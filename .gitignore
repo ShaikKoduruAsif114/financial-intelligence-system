@@ -1,0 +1,31 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Vector store (large binary files, rebuilt via ingest.py)
+vectorstore/
+
+# Raw PDFs (generated via download_dataset.py)
+data/raw/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+desktop.ini
+Thumbs.db

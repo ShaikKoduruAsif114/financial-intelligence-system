@@ -1,0 +1,13 @@
+streamlit
+chromadb
+sentence-transformers
+langchain
+langchain-openai
+langchain-text-splitters
+langchain-community
+pymupdf
+rank-bm25
+python-dotenv
+fpdf
+ragas
+datasets
