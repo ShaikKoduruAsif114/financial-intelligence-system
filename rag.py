@@ -1,20 +1,15 @@
 import os
-from typing import List, Dict, Any
-from pathlib import Path
-from dotenv import load_dotenv
 import pickle
+from typing import Any, Dict, List
 
 import chromadb
-from chromadb.utils import embedding_functions
-
-# For Reranking
-from sentence_transformers import CrossEncoder
 import numpy as np
-
-# For LLM Generation
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from sentence_transformers import CrossEncoder
 
 load_dotenv()
 
@@ -28,32 +23,35 @@ TOP_K_RERANK = 3        # How many docs to pass to the LLM after reranking
 def retrieve_documents(query: str, n_results: int = TOP_K_RETRIEVE) -> List[Dict[str, Any]]:
     '''Retrieve top K documents from ChromaDB based on semantic similarity.'''
     client = chromadb.PersistentClient(path=VECTORSTORE_PATH)
-    
-    # Use the exact same embedding model as in ingest.py
+
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name='BAAI/bge-small-en-v1.5'
     )
-    
+
     collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
-    
+
     results = collection.query(
         query_texts=[query],
         n_results=n_results
     )
-    
-    # Format the results into a cleaner list of dictionaries
+
     retrieved_docs = []
-    
+
     if results['documents'] and results['documents'][0]:
         docs = results['documents'][0]
         metadatas = results['metadatas'][0]
-        
+
         for doc, meta in zip(docs, metadatas):
             retrieved_docs.append({
                 'text': doc,
-                'metadata': meta
+                'metadata': {
+                    'source': meta.get('source', 'Unknown source'),
+                    'page': meta.get('page', 1),
+                    'kind': meta.get('kind', 'text'),
+                    'section': meta.get('section', 'Document text'),
+                }
             })
-            
+
     return retrieved_docs
 
 def retrieve_bm25(query: str, n_results: int = TOP_K_RETRIEVE) -> List[Dict[str, Any]]:
@@ -69,19 +67,23 @@ def retrieve_bm25(query: str, n_results: int = TOP_K_RETRIEVE) -> List[Dict[str,
 
     tokenized_query = query.lower().split(" ")
     scores = bm25.get_scores(tokenized_query)
-    
-    # Get top n_results indices
+
     top_n_indices = np.argsort(scores)[::-1][:n_results]
-    
+
     retrieved_docs = []
     for idx in top_n_indices:
         if scores[idx] > 0:
             chunk = chunks[idx]
             retrieved_docs.append({
-                'text': chunk['text'],
-                'metadata': {'source': chunk['source'], 'page': chunk['page']}
+                'text': chunk['content'],
+                'metadata': {
+                    'source': chunk.get('source', 'Unknown source'),
+                    'page': chunk.get('page', 1),
+                    'kind': chunk.get('kind', 'text'),
+                    'section': chunk.get('section', 'Document text'),
+                }
             })
-            
+
     return retrieved_docs
 
 def hybrid_search(query: str, n_results: int = TOP_K_RETRIEVE) -> List[Dict[str, Any]]:
@@ -141,21 +143,33 @@ def rerank_documents(query: str, documents: List[Dict[str, Any]], top_k: int = T
     return reranked_docs[:top_k]
 
 # ── 3. LLM GENERATION ───────────────────────────────────────────
+def format_context_for_prompt(context_docs: List[Dict[str, Any]]) -> str:
+    """Format retrieved evidence so the LLM sees source, page, and document kind clearly."""
+    context_text = ""
+    for doc in context_docs:
+        metadata = doc.get('metadata', {})
+        source = metadata.get('source', 'Unknown source')
+        page = metadata.get('page', 'Unknown page')
+        kind = metadata.get('kind', 'text')
+        section = metadata.get('section', 'Document text')
+        context_text += (
+            f"\n[TYPE: {kind.upper()}, SOURCE: {source}, PAGE: {page}, SECTION: {section}]\n"
+            f"{doc['text']}\n"
+        )
+    return context_text
+
+
 def generate_answer(query: str, context_docs: List[Dict[str, Any]]) -> str:
     '''Generate an answer using an LLM, given the query and retrieved context.'''
-    
-    # Format the context so the LLM can read the text and its source easily
-    context_text = ""
-    for idx, doc in enumerate(context_docs):
-        source = doc['metadata'].get('source', 'Unknown source')
-        page = doc['metadata'].get('page', 'Unknown page')
-        context_text += f"\n[SOURCE: {source}, PAGE: {page}]\n{doc['text']}\n"
 
-    # Define the core instructions (Prompt) for the LLM
-    prompt_template = """You are a Financial Research Assistant. 
-Use the following pieces of retrieved financial documents to answer the user's question. 
-If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
-ALWAYS cite your sources clearly at the end of your answer, referencing the Source File and Page number provided in the context.
+    context_text = format_context_for_prompt(context_docs)
+
+    prompt_template = """You are a Financial Research Assistant.
+Use the following retrieved evidence from financial documents to answer the user's question.
+Prioritize tables, chart/figure summaries, and direct document text when they are relevant.
+If the evidence is insufficient, say so plainly instead of guessing.
+ALWAYS cite the source file, page, and document type at the end of your answer.
+When chart or figure evidence is used, explicitly mention the chart/figure in your reasoning and cite it as [TYPE: FIGURE].
 
 Context:
 {context}
@@ -164,26 +178,24 @@ Question:
 {question}
 
 Answer:"""
-    
+
     prompt = ChatPromptTemplate.from_template(prompt_template)
-    
-    # LLM inference. Note: you can use Groq or OpenAI here by changing the model name and API key.
+
     llm = ChatOpenAI(
-        model="llama-3.1-8b-instant", 
+        model=os.getenv('LLM_MODEL', 'llama-3.1-8b-instant'),
         temperature=0,
-        base_url="https://api.groq.com/openai/v1"
+        api_key=os.getenv('GROQ_API_KEY') or os.getenv('OPENAI_API_KEY'),
+        base_url=os.getenv('LLM_BASE_URL', 'https://api.groq.com/openai/v1')
     )
-    
-    # Create the generation chain
+
     chain = prompt | llm | StrOutputParser()
-    
-    # Generate the response
+
     print("Generating answer...")
     response = chain.invoke({
         "context": context_text,
         "question": query
     })
-    
+
     return response
 
 # ── MAIN PIPELINE ───────────────────────────────────────────────

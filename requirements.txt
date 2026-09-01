@@ -6,8 +6,13 @@ langchain-openai
 langchain-text-splitters
 langchain-community
 pymupdf
+pdfplumber
+python-docx
+openpyxl
+pandas
 rank-bm25
 python-dotenv
 fpdf
 ragas
 datasets
+pytest
